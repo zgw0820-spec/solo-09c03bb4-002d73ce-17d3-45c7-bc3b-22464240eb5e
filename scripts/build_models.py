@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import sys
 from pathlib import Path
 
@@ -123,6 +124,17 @@ def _idf(df_count: float, total_docs: float, *, smoothing: int) -> float:
     return math.log((total_docs + smoothing) / (df_count + smoothing)) + 1.0
 
 
+def _atomic_write_json(path: Path, payload: dict) -> None:
+    """Write via a temp file + rename so a reader never sees a partial JSON."""
+    tmp = path.with_name(f".{path.name}.tmp")
+    with tmp.open("w", encoding="utf-8") as fh:
+        json.dump(payload, fh, indent=2, sort_keys=False)
+        fh.write("\n")
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(tmp, path)
+
+
 def _build(
     version: str,
     description: str,
@@ -186,9 +198,7 @@ def main() -> None:
     out_dir.mkdir(exist_ok=True)
     for model in (v1, v2):
         path = out_dir / f"{model.version}.json"
-        with path.open("w", encoding="utf-8") as fh:
-            json.dump(model.to_dict(), fh, indent=2, sort_keys=False)
-            fh.write("\n")
+        _atomic_write_json(path, model.to_dict())
         print(f"wrote {path} ({len(model.vocabulary)} terms, threshold={model.threshold})")
 
     # Sanity: same email, different scores/versions.

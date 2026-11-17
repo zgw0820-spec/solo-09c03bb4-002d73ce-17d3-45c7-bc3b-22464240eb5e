@@ -27,13 +27,18 @@
         <div class="panel-head">
           <h2>模型切换</h2>
           <span class="spacer"></span>
+          <button class="tiny ghost" id="reload-models" title="重新读取模型目录中的全部 JSON">重试加载</button>
           <button class="tiny ghost" id="refresh-models">刷新</button>
         </div>
+        <div id="model-notices"></div>
         <div class="model-grid" id="model-grid">
           <div class="empty">加载中…</div>
         </div>
+        <div class="model-grid" id="model-issues"></div>
         <p class="small muted" style="margin:10px 0 0">
           切换仅影响 <b>此后接单</b> 的邮件；已在队列中的请求继续使用接单时的模型版本。
+          损坏或写了一半的 JSON 不会出现在可切换列表中；运维修复文件后点「重试加载」即可，
+          加载失败不影响在线分类。
         </p>
       </div>
 

@@ -56,6 +56,18 @@ jobs: dict[str, dict[str, Any]] = {}
 _background_tasks: set[asyncio.Task] = set()
 
 
+def _model_status() -> dict[str, Any]:
+    """Healthy-version list plus every artifact that failed validation."""
+    return {
+        "active": active_version,
+        "default_version": registry.default_version,
+        "configured_default": os.environ.get("DEFAULT_MODEL_VERSION"),
+        "models": registry.versions,
+        "issues": registry.issue_public(),
+        "degraded": bool(registry.issues),
+    }
+
+
 def _spawn(coro, *, name: str) -> asyncio.Task:
     """Create a background task while keeping a strong reference to it."""
     task = asyncio.create_task(coro, name=name)
@@ -278,11 +290,14 @@ def _new_job(payload: SubmitIn, *, prefix: str = "job") -> Job:
 async def lifespan(_app: FastAPI):
     await worker.start()
     logger.info(
-        "models loaded: %s (active=%s, model_dir=%s)",
+        "models loaded: %s (active=%s, default=%s, model_dir=%s)",
         ", ".join(registry.versions),
         active_version,
+        registry.default_version,
         MODELS_DIR,
     )
+    for issue in registry.issues:
+        logger.warning("model artifact issue: %s -> %s", issue.file, issue.reason)
     try:
         yield
     finally:
@@ -306,7 +321,13 @@ async def index() -> FileResponse:
 
 @app.get("/healthz")
 async def healthz() -> dict:
-    return {"status": "ok", "active_model": active_version, "models": registry.versions}
+    return {
+        "status": "ok",
+        "active_model": active_version,
+        "models": registry.versions,
+        "model_issues": registry.issue_public(),
+        "degraded": bool(registry.issues),
+    }
 
 
 @app.get("/api/models")
@@ -318,6 +339,7 @@ async def list_models() -> dict:
         models.append(
             {
                 "version": version,
+                "file": registry.source_file(version),
                 "description": model.description,
                 "threshold": model.threshold,
                 "vocabulary_size": len(model.vocabulary),
@@ -331,7 +353,37 @@ async def list_models() -> dict:
                 ],
             }
         )
-    return {"active": active_version, "models": models}
+    return {
+        "active": active_version,
+        "default_version": registry.default_version,
+        "configured_default": os.environ.get("DEFAULT_MODEL_VERSION"),
+        "models": models,
+        "issues": registry.issue_public(),
+        "degraded": bool(registry.issues),
+    }
+
+
+@app.post("/api/models/reload")
+async def reload_models() -> dict:
+    """Re-read every artifact after an on-disk repair.
+
+    The scan never mutates the serving snapshot until all files validate; a
+    half-written or otherwise invalid file is reported and excluded from the
+    switchable list, while the models currently classifying traffic keep
+    running untouched.
+    """
+    global active_version
+    summary = registry.reload(required_versions=[active_version])
+    if active_version not in registry:
+        # Defensive: required_versions should prevent this from happening.
+        active_version = registry.default_version
+    return {
+        **summary,
+        "active": active_version,
+        "default_version": registry.default_version,
+        "issues": registry.issue_public(),
+        "degraded": bool(registry.issues),
+    }
 
 
 @app.post("/api/model")
@@ -339,17 +391,27 @@ async def switch_model(payload: SwitchIn) -> dict:
     if payload.version not in registry:
         raise HTTPException(
             status_code=404,
-            detail=f"未知模型版本 {payload.version!r}，可用: {registry.versions}",
+            detail=(
+                f"模型版本 {payload.version!r} 未通过校验或不存在，无法切换；"
+                f"当前可用: {registry.versions}"
+            ),
         )
     event = _set_active(payload.version, source="console", note=payload.note)
-    return {"active": active_version, "event": event, "models": registry.versions}
+    return {
+        "active": active_version,
+        "event": event,
+        "models": registry.versions,
+        "issues": registry.issue_public(),
+    }
 
 
 @app.get("/api/state")
 async def state() -> dict:
     return {
         "active_model": active_version,
+        "model_status": _model_status(),
         "models": registry.versions,
+        "model_issues": registry.issue_public(),
         "switches": list(reversed(switches[-20:])),
         "worker": worker.snapshot(),
         "config": {

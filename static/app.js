@@ -3,6 +3,10 @@
 const state = {
   models: [],
   active: null,
+  defaultVersion: null,
+  configuredDefault: null,
+  issues: [],
+  degraded: false,
   emails: [],
   jobs: [],
   expanded: new Set(),
@@ -192,23 +196,88 @@ async function loadModels() {
   const data = await api("/api/models");
   state.models = data.models;
   state.active = data.active;
+  state.defaultVersion = data.default_version;
+  state.configuredDefault = data.configured_default;
+  state.issues = data.issues || [];
+  state.degraded = !!data.degraded;
+  renderModelNotices();
   renderModels();
+  renderModelIssues();
   updateActiveBadge(data.active);
+}
+
+function renderModelNotices() {
+  const box = $("#model-notices");
+  box.textContent = "";
+  // The configured default was unusable: show the healthy version actually
+  // serving traffic so operators are never guessing which model is live.
+  if (
+    state.configuredDefault &&
+    state.configuredDefault !== state.defaultVersion
+  ) {
+    const note = el("div", "notice warn");
+    note.append(
+      el(
+        "strong",
+        null,
+        `配置的默认模型 ${state.configuredDefault} 不可用，实际启用健康版本 ${state.defaultVersion}（现行 ${state.active ?? "—"}）`
+      )
+    );
+    box.append(note);
+  }
+  if (state.issues.length) {
+    const note = el("div", "notice bad");
+    note.append(
+      el(
+        "strong",
+        null,
+        `模型目录存在 ${state.issues.length} 项加载问题，损坏文件已被禁止切换；其他健康版本照常接单`
+      )
+    );
+    box.append(note);
+  }
+}
+
+function renderModelIssues() {
+  const grid = $("#model-issues");
+  grid.textContent = "";
+  if (!state.issues.length) return;
+  for (const issue of state.issues) {
+    const card = el("div", "model-card broken");
+    const row = el("div", "row");
+    row.append(el("span", "pill error", "损坏/忽略"));
+    row.append(el("span", "mono small", issue.file));
+    row.append(el("span", "spacer"));
+    row.append(el("button", "tiny primary", "重试加载"));
+    row.lastChild.onclick = reloadModels;
+    card.append(row);
+    card.append(el("div", "reason", issue.reason));
+    if (issue.attempted_version) {
+      card.append(el("div", "small muted", `文件内声明版本：${issue.attempted_version}`));
+    }
+    grid.append(card);
+  }
 }
 
 function updateActiveBadge(active) {
   const badge = $("#active-badge");
   badge.textContent = `现行模型 · ${active ?? "—"}`;
-  badge.className = "badge active";
+  badge.className = "badge " + (state.degraded ? "warn" : "active");
 }
 
 function renderModels() {
   const grid = $("#model-grid");
   grid.textContent = "";
+  if (!state.models.length) {
+    grid.append(el("div", "empty", "没有任何通过校验的模型，请修复文件后重试加载"));
+  }
   for (const model of state.models) {
     const card = el("div", "model-card" + (model.version === state.active ? " current" : ""));
     const row = el("div", "row");
     row.append(versionPill(model.version));
+    if (model.version === state.defaultVersion) {
+      row.append(el("span", "badge active", "默认启用"));
+    }
     row.append(el("span", "small muted", `阈值 ${model.threshold}`));
     row.append(el("span", "spacer"));
     if (model.version === state.active) {
@@ -220,7 +289,8 @@ function renderModels() {
     }
     card.append(row);
     card.append(el("div", "desc", model.description || ""));
-    card.append(el("div", "small muted", `词表 ${model.vocabulary_size} 项`));
+    const source = model.file ? `文件 ${model.file} · ` : "";
+    card.append(el("div", "small muted", `${source}词表 ${model.vocabulary_size} 项`));
 
     const terms = el("div", "terms");
     for (const term of model.top_spam_terms.slice(0, 6)) {
@@ -235,6 +305,28 @@ function renderModels() {
   updateActiveBadge(state.active);
 }
 
+async function reloadModels() {
+  const button = $("#reload-models");
+  button.disabled = true;
+  try {
+    const data = await api("/api/models/reload", { method: "POST" });
+    if (data.status === "reloaded") {
+      const parts = [];
+      if (data.added.length) parts.push(`恢复 ${data.added.join(", ")}`);
+      if (data.removed.length) parts.push(`下线 ${data.removed.join(", ")}`);
+      toast(parts.length ? `重新加载成功：${parts.join("，")}` : "重新加载完成，模型列表无变化");
+    } else {
+      toast(`加载未生效：${data.reason || "存在损坏文件"}，在线分类不受影响`, true);
+    }
+    await loadModels();
+    await refreshState();
+  } catch (error) {
+    toast(`重试加载失败：${error.message}`, true);
+  } finally {
+    button.disabled = false;
+  }
+}
+
 async function switchModel(version) {
   try {
     const data = await api("/api/model", {
@@ -242,6 +334,7 @@ async function switchModel(version) {
       body: JSON.stringify({ version, note: "console switch" }),
     });
     state.active = data.active;
+    state.issues = data.issues || state.issues;
     toast(`现行模型已切换为 ${data.active}`);
     await loadModels();
     await refreshState();
@@ -259,6 +352,14 @@ async function refreshState() {
     return;
   }
   state.active = data.active_model;
+  const nextDegraded = !!(data.model_issues && data.model_issues.length);
+  const issueSignature = JSON.stringify(data.model_issues || []);
+  if (nextDegraded !== state.degraded || issueSignature !== JSON.stringify(state.issues)) {
+    state.degraded = nextDegraded;
+    state.issues = Array.isArray(data.model_issues) ? data.model_issues : state.issues;
+    renderModelNotices();
+    renderModelIssues();
+  }
   updateActiveBadge(data.active_model);
   const worker = data.worker;
   $("#pending-badge").textContent = `队列 ${worker.pending}`;
@@ -573,7 +674,9 @@ function init() {
   };
   $("#submit").onclick = submitEmails;
   $("#run-demo").onclick = runDemo;
-  $("#refresh-models").onclick = loadModels;
+  $("#refresh-models").onclick = () =>
+    loadModels().catch((error) => toast(`刷新模型失败：${error.message}`, true));
+  $("#reload-models").onclick = reloadModels;
   $("#auto-refresh").onchange = (event) => {
     if (!event.target.checked) return;
     refreshState();

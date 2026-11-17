@@ -12,6 +12,7 @@ Verifies, over real HTTP:
 5. deadlines: a slow email times out, its batch-mates still succeed, and the
    late result never flips the timeout back to success
 6. early dispatch when the earliest deadline is near
+7. model reload endpoint preserves the healthy serving snapshot
 """
 
 from __future__ import annotations
@@ -55,9 +56,13 @@ def main() -> int:
     health = client.get("/healthz").json()
     check(health["status"] == "ok", "service healthy")
     check({"v1", "v2"} <= set(health["models"]), "both v1 and v2 shipped")
+    check("model_issues" in health and health["degraded"] is False,
+          "health reports model issue list and is not degraded")
     models = client.get("/api/models").json()["models"]
     sizes = {m["version"]: m["vocabulary_size"] for m in models}
     check(sizes["v1"] != sizes["v2"], f"models differ (v1={sizes['v1']}, v2={sizes['v2']} terms)")
+    check(all(m.get("file", "").endswith(".json") for m in models),
+          "each model exposes its source JSON file")
 
     print("2. model switch")
     switched = client.post("/api/model", json={"version": "v2"}).json()
@@ -155,6 +160,17 @@ def main() -> int:
     slow = next(e for e in new if e["simulate_latency_ms"] > 0)
     check(slow["status"] == "timeout", "demo slow email timed out")
     check(client.get("/healthz").json()["active_model"] == "v2", "demo left v2 active")
+
+    print("8. model reload keeps the serving snapshot intact")
+    active_before = client.get("/healthz").json()["active_model"]
+    reload_result = client.post("/api/models/reload").json()
+    check(reload_result["status"] == "reloaded", "reload scans the model directory")
+    check(set(reload_result["loaded"]) >= {"v1", "v2"}, "healthy versions re-adopted")
+    check(reload_result["issues"] == [], "no artifact issues on the shipped directory")
+    check(client.get("/healthz").json()["active_model"] == active_before,
+          "reload never changes the active model pointer")
+    check(client.post("/api/model", json={"version": "v9"}).status_code == 404,
+          "switching to an unvalidated version is rejected")
 
     print()
     if failures:

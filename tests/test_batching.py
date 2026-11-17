@@ -36,7 +36,7 @@ def make_registry() -> ModelRegistry:
         bias=-0.5,
         threshold=0.5,
     )
-    return ModelRegistry({"v1": v1, "v2": v2}, "v1")
+    return ModelRegistry({"v1": v1, "v2": v2}, directory=ROOT / "models", preferred_default="v1")
 
 
 async def wait_for(predicate, timeout: float = 3.0, tick: float = 0.005):

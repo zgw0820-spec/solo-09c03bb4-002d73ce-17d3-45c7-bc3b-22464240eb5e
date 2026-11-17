@@ -16,9 +16,13 @@ services:
       MAX_EMAILS_PER_SUBMISSION: "16"
       LOG_LEVEL: INFO
     volumes:
-      # Two distinct English bag-of-words models are baked into the image and
-      # also mounted read-only so operators can inspect the artifacts.
-      - ./models:/srv/models:ro
+      # Two distinct English bag-of-words models are baked into the image.
+      # The host directory is mounted read-write (not read-only) so on-call
+      # operators can repair a corrupt artifact in place and trigger
+      # "重试加载" in the web console without restarting the service.  The
+      # baked-in copy under /srv/models still serves as the build-time
+      # fallback; never edit files inside the container image itself.
+      - ./models:/srv/models
     healthcheck:
       test:
         - CMD
